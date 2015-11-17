@@ -40,8 +40,8 @@
 /**
  * SECTION:element-pocketsphix
  *
- * The element runs the speech recohgnition on incomming audio buffers and
- * generates an element messages named <classname>&quot;pocketsphinx&quot;</classname>
+ * The element runs the speech recognition on incoming audio buffers and
+ * generates an element message named <classname>&quot;pocketsphinx&quot;</classname>
  * for each hypothesis and one for the final result. The message's structure 
  * contains these fields:
  *
@@ -51,6 +51,20 @@
  *   #GstClockTime
  *   <classname>&quot;timestamp&quot;</classname>:
  *   the timestamp of the buffer that triggered the message.
+ *   </para>
+ * </listitem>
+ * <listitem>
+ *   <para>
+ *   #GstClockTime
+ *   <classname>&quot;start_time&quot;</classname>:
+ *   the timestamp of the start of the speech that was recognized.
+ *   </para>
+ * </listitem>
+ * <listitem>
+ *   <para>
+ *   #GstClockTime
+ *   <classname>&quot;end_time&quot;</classname>:
+ *   the timestamp of the end of the speech that was recognized.
  *   </para>
  * </listitem>
  * <listitem>
@@ -563,21 +577,33 @@ gst_pocketsphinx_init(GstPocketSphinx * ps)
     gst_pad_use_fixed_caps(ps->srcpad);
 
     /* Initialize time. */
+    ps->speech_start_time = 0;
     ps->last_result_time = 0;
     ps->last_result = NULL;
 }
 
 static void
 gst_pocketsphinx_post_message(GstPocketSphinx *ps, gboolean final,
-    GstClockTime timestamp, gint32 prob, const gchar *hyp)
+    GstClockTime timestamp, GstClockTime start_time, GstClockTime end_time,
+    gint32 prob, const gchar *hyp)
 {
     GstStructure *s = gst_structure_new ("pocketsphinx",
         "timestamp", G_TYPE_UINT64, timestamp,
+        "start_time", G_TYPE_UINT64, start_time,
+        "end_time", G_TYPE_UINT64, end_time,
         "final", G_TYPE_BOOLEAN, final,
         "confidence", G_TYPE_LONG, prob,
         "hypothesis", G_TYPE_STRING, hyp, NULL);
 
     gst_element_post_message (GST_ELEMENT (ps), gst_message_new_element (GST_OBJECT (ps), s));
+}
+
+static GstClockTime
+speech_end(GstPocketSphinx *ps)
+{
+    double nspeech, ncpu, nwall;
+    ps_get_utt_time(ps->ps, &nspeech, &ncpu, &nwall);
+    return ps->speech_start_time + (GstClockTime)(nspeech * GST_SECOND);
 }
 
 static GstFlowReturn
@@ -606,6 +632,7 @@ gst_pocketsphinx_chain(GstPad * pad, GstObject *parent, GstBuffer * buffer)
     in_speech = ps_get_in_speech(ps->ps);
     if (in_speech && !ps->utt_started) {
     	ps->utt_started = TRUE;
+        ps->speech_start_time = GST_BUFFER_TIMESTAMP(buffer);
     }
     if (!in_speech && ps->utt_started) {
 	gst_pocketsphinx_finalize_utt(ps);
@@ -623,6 +650,7 @@ gst_pocketsphinx_chain(GstPad * pad, GstObject *parent, GstBuffer * buffer)
                 g_free(ps->last_result);
                 ps->last_result = g_strdup(hyp);
                 gst_pocketsphinx_post_message(ps, FALSE, ps->last_result_time,
+                    ps->speech_start_time, speech_end(ps),
                     ps_get_prob(ps->ps), hyp);
             }
         }
@@ -639,11 +667,13 @@ gst_pocketsphinx_finalize_utt(GstPocketSphinx *ps)
     GstBuffer *buffer;
     char const *hyp;
     int32 score;
+    GstClockTime speech_end_time;
 
     hyp = NULL;
     if (!ps->listening_started || !ps->utt_started)
 	return;
 
+    speech_end_time = speech_end(ps);
     ps_end_utt(ps->ps);
     ps->listening_started = FALSE;
     hyp = ps_get_hyp(ps->ps, &score);
@@ -663,6 +693,7 @@ gst_pocketsphinx_finalize_utt(GstPocketSphinx *ps)
     }
     if (hyp) {
     		gst_pocketsphinx_post_message(ps, TRUE, GST_CLOCK_TIME_NONE,
+                    ps->speech_start_time, speech_end_time,
     		    ps_get_prob(ps->ps), hyp);
         buffer = gst_buffer_new_and_alloc(strlen(hyp) + 1);
 	gst_buffer_fill(buffer, 0, hyp, strlen(hyp));
